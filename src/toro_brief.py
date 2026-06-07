@@ -113,8 +113,8 @@ Return ONLY this JSON, no markdown, no preamble:
 }}"""
 
     response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1000,
+        model="claude-sonnet-4-6",
+        max_tokens=4000,
         tools=[{"type": "web_search_20250305", "name": "web_search"}],
         messages=[{"role": "user", "content": prompt}]
     )
@@ -124,8 +124,34 @@ Return ONLY this JSON, no markdown, no preamble:
         if block.type == "text":
             raw += block.text
 
+    # Strip markdown fences
     clean = raw.replace("```json", "").replace("```", "").strip()
-    return json.loads(clean[clean.index("{"):clean.rindex("}")+1])
+
+    # Find outermost JSON object by tracking brace depth
+    start = clean.index("{")
+    depth = 0
+    end = start
+    for i, ch in enumerate(clean[start:], start):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+
+    json_str = clean[start:end+1]
+
+    # Try strict parse, then repair trailing commas if needed
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError as e:
+        import re
+        repaired = re.sub(r",\s*([}\]])", r"\1", json_str)
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError:
+            raise RuntimeError(f"Could not parse brief JSON: {e}\nRaw: {json_str[:500]}")
 
 # ── DISCORD DELIVERY ──────────────────────────────────────────────────────────
 
