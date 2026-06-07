@@ -1,7 +1,7 @@
 """
 TORO BRIEF — Daily Market Intelligence Engine
-Runs at 9 PM ET on weekdays via GitHub Actions.
-Delivers to Gmail + Notion + Discord.
+Runs at 9 PM ET weekdays via GitHub Actions.
+Delivers to Discord (required) + Gmail + Notion (both optional).
 """
 
 import os
@@ -10,22 +10,22 @@ import datetime
 import requests
 import yfinance as yf
 import anthropic
-from notion_client import Client as NotionClient
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-# ─── CONFIG ─────────────────────────────────────────────────────────────────
+# ── CONFIG ────────────────────────────────────────────────────────────────────
 
 ANTHROPIC_API_KEY   = os.environ["ANTHROPIC_API_KEY"]
-NOTION_TOKEN        = os.environ["NOTION_TOKEN"]
-NOTION_PAGE_ID      = os.environ["NOTION_PAGE_ID"]   # Parent page for briefs DB
-GMAIL_USER          = os.environ["GMAIL_USER"]
-GMAIL_APP_PASSWORD  = os.environ["GMAIL_APP_PASSWORD"]
-GMAIL_TO            = os.environ["GMAIL_TO"]
 DISCORD_WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 
-# Social/news sources the AI should reference
+# Optional — only used if secrets are present
+GMAIL_USER          = os.environ.get("GMAIL_USER")
+GMAIL_APP_PASSWORD  = os.environ.get("GMAIL_APP_PASSWORD")
+GMAIL_TO            = os.environ.get("GMAIL_TO")
+NOTION_TOKEN        = os.environ.get("NOTION_TOKEN")
+NOTION_PAGE_ID      = os.environ.get("NOTION_PAGE_ID")
+
 SOCIAL_SOURCES = [
     "@NoLimitGains (x.com/NoLimitGains)",
     "@InTheAssembly (x.com/InTheAssembly)",
@@ -33,14 +33,12 @@ SOCIAL_SOURCES = [
 ]
 DEFAULT_SOURCES = ["Reuters", "Bloomberg", "WSJ", "Unusual Whales", "Finviz", "CNBC"]
 
-# Tickers to track for market pulse
 PULSE_TICKERS = ["SPY", "QQQ", "^VIX", "^GSPC"]
 PULSE_LABELS  = ["SPY", "QQQ", "VIX", "SPX"]
 
-# ─── MARKET DATA ─────────────────────────────────────────────────────────────
+# ── MARKET DATA ───────────────────────────────────────────────────────────────
 
 def fetch_market_pulse():
-    """Pull live quotes for core market tickers via yfinance."""
     pulse = []
     for ticker, label in zip(PULSE_TICKERS, PULSE_LABELS):
         try:
@@ -49,118 +47,68 @@ def fetch_market_pulse():
             price = info.last_price
             prev  = info.previous_close
             chg_pct = ((price - prev) / prev) * 100
-            direction = "up" if chg_pct >= 0 else "down"
             pulse.append({
                 "ticker": label,
-                "price": f"${price:,.2f}" if label != "VIX" else f"{price:.1f}",
+                "price": f"${price:,.2f}" if label not in ("VIX", "SPX") else f"{price:,.2f}",
                 "chg": f"{chg_pct:+.2f}%",
-                "dir": direction,
-                "raw_price": price,
+                "dir": "up" if chg_pct >= 0 else "down",
                 "raw_chg": chg_pct,
             })
         except Exception as e:
-            pulse.append({"ticker": label, "price": "N/A", "chg": "N/A", "dir": "flat", "error": str(e)})
+            pulse.append({"ticker": label, "price": "N/A", "chg": "N/A", "dir": "flat"})
+            print(f"Warning: could not fetch {ticker}: {e}")
     return pulse
 
+# ── AI BRIEF ─────────────────────────────────────────────────────────────────
 
-def fetch_robinhood_positions():
-    """
-    Placeholder — Robinhood doesn't have an official public API.
-    In production, use robin_stocks with your RH credentials stored as secrets.
-    Returns a summary string for the AI prompt.
-    """
-    try:
-        # Uncomment and configure when ready:
-        # import robin_stocks.robinhood as r
-        # r.login(os.environ["RH_USERNAME"], os.environ["RH_PASSWORD"])
-        # positions = r.account.build_holdings()
-        # return json.dumps(positions, indent=2)
-        return "Robinhood positions: not yet connected (add RH_USERNAME/RH_PASSWORD secrets to enable)"
-    except Exception as e:
-        return f"Robinhood positions unavailable: {e}"
-
-
-# ─── AI BRIEF GENERATION ─────────────────────────────────────────────────────
-
-def generate_brief(pulse_data: list, rh_positions: str) -> dict:
-    """Call Claude Sonnet with web search to generate the full brief."""
+def generate_brief(pulse_data, rh_positions="Not connected"):
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
     today = datetime.datetime.now().strftime("%A, %B %-d, %Y")
-    pulse_str = "\n".join([
-        f"  {p['ticker']}: {p['price']} ({p['chg']})"
-        for p in pulse_data
-    ])
+    pulse_str = "\n".join([f"  {p['ticker']}: {p['price']} ({p['chg']})" for p in pulse_data])
     all_sources = DEFAULT_SOURCES + SOCIAL_SOURCES
 
     prompt = f"""You are Toro Brief — a daily market intelligence engine for an active options trader.
-Today is {today}. The trader is Pedro — 25 years old, under-$10k account, focus on options (SPX/NDX index options for 1256 tax treatment, single-stock options, ETF options SPY/QQQ). He trades 6:30–8:00 AM PT / 9:30–11 AM ET.
+Today is {today}. Trader profile: Pedro, 25, sub-$10k account, options focus (SPX/NDX 1256 tax, single-stock, ETF options SPY/QQQ). Active trading window 6:30–8:00 AM PT.
 
-LIVE MARKET DATA (just fetched):
+LIVE MARKET DATA:
 {pulse_str}
 
-ROBINHOOD POSITIONS:
-{rh_positions}
-
-SOURCES TO REFERENCE (search and summarize key signals from each):
+SOURCES TO REFERENCE (search each for latest signals):
 {chr(10).join(all_sources)}
 
-Generate a complete Toro Brief as a JSON object. Be direct, opinionated, and practical.
-For thesis plays, connect REAL WORLD events happening RIGHT NOW to specific tickers (like: AI data center buildout → nuclear energy → CEG; World Cup → consumer brands → BUD/ONON; tariff impact → domestic manufacturers, etc.)
-Flag overbought setups aggressively — the SanDisk lesson is always top of mind.
+Generate a complete Toro Brief as a JSON object. Be direct and opinionated.
+For thesis plays connect REAL WORLD events happening RIGHT NOW to specific tickers.
+Flag overbought setups aggressively.
 
-Return ONLY this JSON structure, no markdown, no preamble:
+Return ONLY this JSON, no markdown, no preamble:
 
 {{
   "biasScore": "X.X/10",
   "biasLabel": "e.g. Cautiously Bearish",
+  "biasRationale": "2-3 sentence market read",
   "techScore": "X.X",
   "flowScore": "X.X",
   "newsScore": "X.X",
-  "biasRationale": "2-3 sentence overall market read",
   "pulse": [
-    {{"ticker":"SPY","price":"$XXX","chg":"X.X%","dir":"up|down","sub":"Key level note"}}
+    {{"ticker":"SPY","price":"$XXX","chg":"X.X%","dir":"up|down","sub":"key level note"}}
   ],
   "news": [
-    {{"tag":"bullish|bearish|watch","text":"headline summary","source":"source name"}}
+    {{"tag":"bullish|bearish|watch","text":"summary","source":"source name"}}
   ],
   "upsidePlays": [
-    {{
-      "ticker":"XXX",
-      "score":"X.X",
-      "signal":"Strong Buy|Buy",
-      "catalyst":"Why now — specific, actionable",
-      "option":"e.g. SPY $550C exp 6/20",
-      "sizing":"sizing note for sub-$10k account",
-      "chips":["RSI note","volume note"]
-    }}
+    {{"ticker":"XXX","score":"X.X","signal":"Strong Buy|Buy","catalyst":"why now","option":"e.g. SPY $550C exp 6/20 or null","sizing":"sizing note","chips":["tag1","tag2"]}}
   ],
   "downsidePlays": [
-    {{
-      "ticker":"XXX",
-      "score":"X.X",
-      "signal":"Strong Sell|Sell",
-      "catalyst":"Why bearish — specific",
-      "option":"put structure OR null if inverse ETF",
-      "sizing":"sizing note",
-      "chips":["flags"]
-    }}
+    {{"ticker":"XXX","score":"X.X","signal":"Strong Sell|Sell","catalyst":"why bearish","option":"put structure or null","sizing":"sizing note","chips":["tag1"]}}
   ],
   "thesis": [
-    {{
-      "tier":"CONSERVATIVE|MODERATE|AGGRESSIVE",
-      "ticker":"TICKER / Company Name",
-      "body":"Real-world connection → market play. Be specific about the catalyst."
-    }}
+    {{"tier":"CONSERVATIVE|MODERATE|AGGRESSIVE","ticker":"TICKER / Name","body":"real-world catalyst to ticker logic"}}
   ],
   "overbought": [
-    {{"ticker":"XXX","rsi":"XX","note":"Why it's extended","flag":"Warning label"}}
+    {{"ticker":"XXX","rsi":"XX","note":"why extended","flag":"warning label"}}
   ],
   "macro": [
-    {{"date":"Day M/D","event":"Event name","impact":"high|med|low"}}
-  ],
-  "positionFlags": [
-    {{"ticker":"XXX","note":"Relevant flag for Pedro's current position"}}
+    {{"date":"Day M/D","event":"event name","impact":"high|med|low"}}
   ]
 }}"""
 
@@ -171,340 +119,237 @@ Return ONLY this JSON structure, no markdown, no preamble:
         messages=[{"role": "user", "content": prompt}]
     )
 
-    raw_text = ""
+    raw = ""
     for block in response.content:
         if block.type == "text":
-            raw_text += block.text
+            raw += block.text
 
-    clean = raw_text.replace("```json", "").replace("```", "").strip()
-    json_start = clean.index("{")
-    json_end = clean.rindex("}") + 1
-    return json.loads(clean[json_start:json_end])
+    clean = raw.replace("```json", "").replace("```", "").strip()
+    return json.loads(clean[clean.index("{"):clean.rindex("}")+1])
 
+# ── DISCORD DELIVERY ──────────────────────────────────────────────────────────
 
-# ─── FORMATTING ──────────────────────────────────────────────────────────────
-
-SIGNAL_EMOJI = {
-    "Strong Buy": "🟢", "Buy": "🟩",
-    "Strong Sell": "🔴", "Sell": "🟥",
-    "Neutral": "⬜"
-}
-TAG_EMOJI = {"bullish": "🟢", "bearish": "🔴", "watch": "🟡"}
+TAG_EMOJI    = {"bullish": "[BULLISH]", "bearish": "[BEARISH]", "watch": "[WATCH]"}
 IMPACT_EMOJI = {"high": "🔴", "med": "🟡", "low": "⚪"}
-TIER_EMOJI = {"CONSERVATIVE": "🟢", "MODERATE": "🟡", "AGGRESSIVE": "🔴"}
+TIER_LABEL   = {"CONSERVATIVE": "[CONSERVATIVE]", "MODERATE": "[MODERATE]", "AGGRESSIVE": "[AGGRESSIVE]"}
 
+def score_color(score_str):
+    try:
+        s = float(score_str.split("/")[0])
+        if s >= 6:   return 0x3B6D11
+        if s >= 5:   return 0xBA7517
+        return 0xE24B4A
+    except:
+        return 0x888780
 
-def format_html_email(brief: dict, pulse: list, date_str: str) -> str:
-    """Render the brief as a clean HTML email."""
+def send_discord(brief, pulse, date_str):
+    base_color = score_color(brief.get("biasScore", "5/10"))
 
-    def pulse_html():
-        rows = ""
-        for p in pulse:
-            color = "#3B6D11" if p.get("dir") == "up" else "#A32D2D"
-            rows += f"""
-            <td style="padding:8px 12px;background:#f8f8f7;border-radius:6px;text-align:center;min-width:80px;">
-              <div style="font-size:13px;font-weight:600;color:#1a1a1a;">{p['ticker']}</div>
-              <div style="font-size:16px;font-weight:600;color:#1a1a1a;margin:2px 0;">{p['price']}</div>
-              <div style="font-size:12px;font-weight:600;color:{color};">{p['chg']}</div>
-              <div style="font-size:11px;color:#888;">{p.get('sub','')}</div>
-            </td>"""
-        return f"<table style='border-collapse:separate;border-spacing:8px;'><tr>{rows}</tr></table>"
+    pulse_val = "  ".join([
+        f"**{p['ticker']}** {p['price']} {'▲' if p['dir']=='up' else '▼'}{p['chg']}"
+        for p in pulse
+    ])
 
-    def news_html():
-        tag_colors = {"bullish": ("#EAF3DE","#3B6D11"), "bearish": ("#FCEBEB","#A32D2D"), "watch": ("#FAEEDA","#854F0B")}
-        html = ""
-        for n in brief.get("news", []):
-            bg, fg = tag_colors.get(n["tag"], ("#f0f0f0","#555"))
-            html += f"""
-            <tr>
-              <td style="padding:8px 0;border-bottom:1px solid #f0ece4;vertical-align:top;">
-                <span style="background:{bg};color:{fg};font-size:10px;font-weight:600;padding:2px 7px;border-radius:4px;margin-right:8px;">{n['tag'].upper()}</span>
-                <span style="font-size:13px;color:#1a1a1a;">{n['text']}</span>
-                <span style="font-size:11px;color:#999;margin-left:6px;">— {n['source']}</span>
-              </td>
-            </tr>"""
-        return f"<table style='width:100%;border-collapse:collapse;'>{html}</table>"
+    # Embed 1 — Bias + Pulse
+    embed1 = {
+        "title": f"🐂  TORO BRIEF — {date_str}",
+        "description": f"**{brief.get('biasScore','—')} — {brief.get('biasLabel','')}**\n{brief.get('biasRationale','')}",
+        "color": base_color,
+        "fields": [
+            {"name": "Technical", "value": brief.get('techScore','—'), "inline": True},
+            {"name": "Flow",      "value": brief.get('flowScore','—'), "inline": True},
+            {"name": "News",      "value": brief.get('newsScore','—'), "inline": True},
+            {"name": "Market Pulse", "value": pulse_val, "inline": False},
+        ],
+        "footer": {"text": "Score guide: 0–2.9 Crisis  |  3–4.9 Bearish  |  5–5.9 Neutral  |  6–7.9 Bullish  |  8–10 Strong Bull"}
+    }
 
-    def plays_html(plays, is_bear=False):
-        accent = "#A32D2D" if is_bear else "#3B6D11"
-        html = ""
-        for p in plays:
-            chips = "".join([f"<span style='font-size:11px;padding:2px 8px;border-radius:4px;background:#f0ece4;color:#666;margin-right:4px;'>{c}</span>" for c in p.get("chips",[])])
-            opt_chip = f"<span style='font-size:11px;padding:2px 8px;border-radius:4px;background:#E6F1FB;color:#185FA5;margin-right:4px;'>{p['option']}</span>" if p.get("option") else ""
-            size_chip = f"<span style='font-size:11px;padding:2px 8px;border-radius:4px;background:#f0ece4;color:#666;margin-right:4px;'>{p['sizing']}</span>" if p.get("sizing") else ""
-            html += f"""
-            <tr>
-              <td style="padding:12px;border-left:3px solid {accent};background:#fafaf8;margin-bottom:8px;border-radius:0 6px 6px 0;display:block;margin:0 0 8px 0;">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-                  <span style="font-size:16px;font-weight:600;color:#1a1a1a;">{p['ticker']}</span>
-                  <span style="font-size:14px;font-weight:600;color:{accent};">{p['score']}/10 — {p['signal']}</span>
-                </div>
-                <div style="font-size:13px;color:#555;margin-bottom:8px;line-height:1.5;">{p['catalyst']}</div>
-                <div>{opt_chip}{size_chip}{chips}</div>
-              </td>
-            </tr>"""
-        return f"<table style='width:100%;border-collapse:collapse;'>{html}</table>"
+    # Embed 2 — News
+    news_lines = []
+    for n in brief.get("news", [])[:6]:
+        tag = TAG_EMOJI.get(n["tag"], "[WATCH]")
+        news_lines.append(f"{tag} {n['text']} — *{n['source']}*")
+    embed2 = {
+        "title": "📰  News & Sentiment",
+        "description": "\n\n".join(news_lines) or "No news flagged.",
+        "color": 0x5F5E5A,
+        "footer": {"text": "Sources: Reuters · Bloomberg · WSJ · Unusual Whales · @NoLimitGains · @InTheAssembly · @CryptoBullet1"}
+    }
 
-    def thesis_html():
-        tier_styles = {
-            "CONSERVATIVE": ("#EAF3DE","#3B6D11"),
-            "MODERATE": ("#FAEEDA","#854F0B"),
-            "AGGRESSIVE": ("#FCEBEB","#A32D2D")
-        }
-        html = ""
-        for t in brief.get("thesis", []):
-            bg, fg = tier_styles.get(t["tier"], ("#f0f0f0","#555"))
-            html += f"""
-            <div style="padding:12px;background:#fafaf8;border-radius:6px;margin-bottom:8px;">
-              <span style="background:{bg};color:{fg};font-size:10px;font-weight:600;padding:2px 8px;border-radius:4px;">{t['tier']}</span>
-              <div style="font-size:14px;font-weight:600;color:#1a1a1a;margin:6px 0 4px;">{t['ticker']}</div>
-              <div style="font-size:13px;color:#555;line-height:1.6;">{t['body']}</div>
-            </div>"""
-        return html
+    # Embed 3 — Upside plays
+    up_lines = []
+    for p in brief.get("upsidePlays", []):
+        chips = "  ".join([f"`{c}`" for c in p.get("chips", [])])
+        opt = f"\n`{p['option']}`" if p.get("option") else ""
+        size = f"  `{p['sizing']}`" if p.get("sizing") else ""
+        up_lines.append(f"**{p['ticker']}** · {p['score']}/10 — {p['signal']}\n{p['catalyst']}{opt}{size}\n{chips}")
+    embed3 = {
+        "title": "🟢  Upside Plays",
+        "description": "\n\n".join(up_lines) or "No upside plays today.",
+        "color": 0x3B6D11,
+    }
 
-    score_color = "#3B6D11" if float(brief.get("biasScore","5/10").split("/")[0]) >= 6.0 else "#A32D2D"
+    # Embed 4 — Downside plays
+    dn_lines = []
+    for p in brief.get("downsidePlays", []):
+        chips = "  ".join([f"`{c}`" for c in p.get("chips", [])])
+        opt = f"\n`{p['option']}`" if p.get("option") else ""
+        size = f"  `{p['sizing']}`" if p.get("sizing") else ""
+        dn_lines.append(f"**{p['ticker']}** · {p['score']}/10 — {p['signal']}\n{p['catalyst']}{opt}{size}\n{chips}")
+    embed4 = {
+        "title": "🔴  Downside Plays",
+        "description": "\n\n".join(dn_lines) or "No downside plays today.",
+        "color": 0xE24B4A,
+    }
 
-    return f"""
-<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f0e8;margin:0;padding:20px;">
-  <div style="max-width:640px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;">
-    
-    <div style="background:#1a1a1a;padding:20px 24px;display:flex;justify-content:space-between;align-items:center;">
-      <div style="font-size:20px;font-weight:700;color:#fff;letter-spacing:-0.5px;">TORO<span style="color:#E24B4A;">.</span>BRIEF</div>
-      <div style="font-size:12px;color:#888;">{date_str}</div>
-    </div>
+    # Embed 5 — Thesis + OB flags + Macro
+    thesis_lines = []
+    for t in brief.get("thesis", []):
+        thesis_lines.append(f"**{TIER_LABEL.get(t['tier'], t['tier'])} {t['ticker']}**\n{t['body']}")
 
-    <div style="padding:20px 24px;background:#f8f5f0;border-bottom:1px solid #ede8df;">
-      <div style="display:flex;justify-content:space-between;align-items:center;">
-        <div>
-          <div style="font-size:32px;font-weight:700;color:{score_color};">{brief.get('biasScore','—')}</div>
-          <div style="font-size:14px;color:#555;margin-top:2px;">{brief.get('biasLabel','')}</div>
-          <div style="font-size:12px;color:#888;margin-top:6px;max-width:340px;">{brief.get('biasRationale','')}</div>
-        </div>
-        <div style="display:flex;gap:16px;">
-          <div style="text-align:center;"><div style="font-size:18px;font-weight:600;color:#1a1a1a;">{brief.get('techScore','—')}</div><div style="font-size:11px;color:#999;">Technical</div></div>
-          <div style="text-align:center;"><div style="font-size:18px;font-weight:600;color:#1a1a1a;">{brief.get('flowScore','—')}</div><div style="font-size:11px;color:#999;">Flow</div></div>
-          <div style="text-align:center;"><div style="font-size:18px;font-weight:600;color:#1a1a1a;">{brief.get('newsScore','—')}</div><div style="font-size:11px;color:#999;">News</div></div>
-        </div>
-      </div>
-    </div>
+    ob_lines = []
+    for o in brief.get("overbought", []):
+        ob_lines.append(f"**{o['ticker']}** RSI {o['rsi']} — {o['flag']}: {o['note']}")
 
-    <div style="padding:20px 24px;">
-      <h3 style="font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#999;margin:0 0 12px;">Market Pulse</h3>
-      {pulse_html()}
-    </div>
+    macro_lines = []
+    for m in brief.get("macro", []):
+        macro_lines.append(f"{IMPACT_EMOJI.get(m['impact'],'•')} **{m['date']}** — {m['event']}")
 
-    <div style="padding:20px 24px;border-top:1px solid #f0ece4;">
-      <h3 style="font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#999;margin:0 0 12px;">News & Sentiment</h3>
-      {news_html()}
-    </div>
+    desc5 = ""
+    if thesis_lines:
+        desc5 += "**── Thesis Plays ──**\n\n" + "\n\n".join(thesis_lines)
+    if ob_lines:
+        desc5 += "\n\n**── Overbought Flags ──**\n\n" + "\n".join(ob_lines)
+    if macro_lines:
+        desc5 += "\n\n**── Macro Calendar ──**\n\n" + "\n".join(macro_lines)
 
-    <div style="padding:20px 24px;border-top:1px solid #f0ece4;">
-      <h3 style="font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#999;margin:0 0 12px;">Upside Plays</h3>
-      {plays_html(brief.get('upsidePlays',[]))}
-    </div>
+    embed5 = {
+        "title": "🧠  Thesis · Flags · Macro",
+        "description": desc5 or "—",
+        "color": 0x378ADD,
+        "footer": {"text": "Not financial advice · Toro Brief runs nightly at 9 PM ET"}
+    }
 
-    <div style="padding:20px 24px;border-top:1px solid #f0ece4;">
-      <h3 style="font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#999;margin:0 0 12px;">Downside Plays</h3>
-      {plays_html(brief.get('downsidePlays',[]), is_bear=True)}
-    </div>
+    # Send all 5 as one payload (Discord supports up to 10 embeds per message)
+    payload = {"embeds": [embed1, embed2, embed3, embed4, embed5]}
+    r = requests.post(DISCORD_WEBHOOK_URL, json=payload)
+    r.raise_for_status()
+    print("✅ Discord delivered")
 
-    <div style="padding:20px 24px;border-top:1px solid #f0ece4;">
-      <h3 style="font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#999;margin:0 0 12px;">Real-World Thesis Plays</h3>
-      {thesis_html()}
-    </div>
+# ── EMAIL DELIVERY (OPTIONAL) ─────────────────────────────────────────────────
 
-    <div style="padding:16px 24px;background:#1a1a1a;text-align:center;">
-      <div style="font-size:11px;color:#555;">Toro Brief · Not financial advice · For informational purposes only</div>
-    </div>
+def send_email(brief, pulse, date_str):
+    if not all([GMAIL_USER, GMAIL_APP_PASSWORD, GMAIL_TO]):
+        print("⏭️  Gmail not configured — skipping")
+        return
+
+    score_color_hex = "#A32D2D" if float(brief.get("biasScore","5/10").split("/")[0]) < 5 else "#3B6D11"
+
+    pulse_html = "".join([
+        f'<td style="padding:8px 12px;background:#f8f8f7;border-radius:6px;text-align:center;min-width:80px;">'
+        f'<div style="font-size:13px;font-weight:600;color:#1a1a1a;">{p["ticker"]}</div>'
+        f'<div style="font-size:16px;font-weight:600;color:#1a1a1a;margin:2px 0;">{p["price"]}</div>'
+        f'<div style="font-size:12px;font-weight:600;color:{"#3B6D11" if p["dir"]=="up" else "#A32D2D"};">{p["chg"]}</div>'
+        f'</td>'
+        for p in pulse
+    ])
+
+    body = f"""<html><body style="font-family:-apple-system,sans-serif;background:#f5f0e8;padding:20px;">
+<div style="max-width:600px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;">
+  <div style="background:#1a1a1a;padding:16px 24px;display:flex;justify-content:space-between;align-items:center;">
+    <span style="font-size:18px;font-weight:700;color:#fff;">TORO<span style="color:#E24B4A;">.</span>BRIEF</span>
+    <span style="font-size:12px;color:#888;">{date_str}</span>
   </div>
-</body>
-</html>"""
+  <div style="padding:20px 24px;background:#f8f5f0;">
+    <div style="font-size:30px;font-weight:700;color:{score_color_hex};">{brief.get('biasScore','—')}</div>
+    <div style="font-size:14px;color:#555;margin-top:2px;">{brief.get('biasLabel','')}</div>
+    <div style="font-size:12px;color:#888;margin-top:6px;">{brief.get('biasRationale','')}</div>
+    <table style="border-collapse:separate;border-spacing:8px;margin-top:12px;"><tr>{pulse_html}</tr></table>
+  </div>
+  <div style="padding:16px 24px;text-align:center;background:#1a1a1a;">
+    <span style="font-size:11px;color:#555;">Toro Brief · Not financial advice</span>
+  </div>
+</div></body></html>"""
 
-
-def format_discord_embeds(brief: dict, pulse: list, date_str: str) -> list:
-    """Format brief as Discord webhook payloads (split into sections)."""
-    score_color = 0x3B6D11 if float(brief.get("biasScore","5/10").split("/")[0]) >= 6.0 else 0xA32D2D
-
-    pulse_str = " | ".join([f"**{p['ticker']}** {p['price']} {p['chg']}" for p in pulse])
-    news_str = "\n".join([
-        f"{TAG_EMOJI.get(n['tag'],'•')} {n['text']} — *{n['source']}*"
-        for n in brief.get("news", [])[:5]
-    ])
-
-    up_plays = "\n".join([
-        f"🟢 **{p['ticker']}** {p['score']}/10 — {p['signal']}\n{p['catalyst'][:120]}..."
-        for p in brief.get("upsidePlays", [])
-    ])
-    dn_plays = "\n".join([
-        f"🔴 **{p['ticker']}** {p['score']}/10 — {p['signal']}\n{p['catalyst'][:120]}..."
-        for p in brief.get("downsidePlays", [])
-    ])
-    thesis_str = "\n".join([
-        f"{TIER_EMOJI.get(t['tier'],'•')} **[{t['tier']}]** {t['ticker']}\n{t['body'][:150]}..."
-        for t in brief.get("thesis", [])
-    ])
-    macro_str = "\n".join([
-        f"{IMPACT_EMOJI.get(m['impact'],'•')} {m['date']} — {m['event']}"
-        for m in brief.get("macro", [])
-    ])
-
-    payload1 = {
-        "embeds": [{
-            "title": f"🐂 TORO BRIEF — {date_str}",
-            "description": f"**{brief.get('biasScore','—')} — {brief.get('biasLabel','')}**\n{brief.get('biasRationale','')}",
-            "color": score_color,
-            "fields": [
-                {"name": "📊 Market Pulse", "value": pulse_str, "inline": False},
-                {"name": f"Technical: {brief.get('techScore','—')}", "value": "", "inline": True},
-                {"name": f"Flow: {brief.get('flowScore','—')}", "value": "", "inline": True},
-                {"name": f"News: {brief.get('newsScore','—')}", "value": "", "inline": True},
-            ]
-        }]
-    }
-
-    payload2 = {
-        "embeds": [{
-            "title": "📰 News & Sentiment",
-            "description": news_str,
-            "color": 0x888780,
-        }]
-    }
-
-    payload3 = {
-        "embeds": [{
-            "title": "🟢 Upside Plays",
-            "description": up_plays or "No upside plays today.",
-            "color": 0x639922,
-            "fields": [{"name": "🔴 Downside Plays", "value": dn_plays or "No downside plays today.", "inline": False}]
-        }]
-    }
-
-    payload4 = {
-        "embeds": [{
-            "title": "🧠 Real-World Thesis Plays",
-            "description": thesis_str or "—",
-            "color": 0x378ADD,
-            "fields": [{"name": "📅 Macro Calendar", "value": macro_str or "—", "inline": False}]
-        }]
-    }
-
-    return [payload1, payload2, payload3, payload4]
-
-
-# ─── DELIVERY ─────────────────────────────────────────────────────────────────
-
-def send_email(html_body: str, date_str: str):
     msg = MIMEMultipart("alternative")
     msg["Subject"] = f"🐂 Toro Brief — {date_str}"
     msg["From"]    = GMAIL_USER
     msg["To"]      = GMAIL_TO
-    msg.attach(MIMEText(html_body, "html"))
+    msg.attach(MIMEText(body, "html"))
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-        server.sendmail(GMAIL_USER, GMAIL_TO, msg.as_string())
-    print("✅ Email sent")
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+        s.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+        s.sendmail(GMAIL_USER, GMAIL_TO, msg.as_string())
+    print("✅ Email delivered")
 
+# ── NOTION DELIVERY (OPTIONAL) ────────────────────────────────────────────────
 
-def send_discord(embeds: list):
-    for payload in embeds:
-        r = requests.post(DISCORD_WEBHOOK_URL, json=payload)
-        r.raise_for_status()
-    print("✅ Discord sent")
+def save_to_notion(brief, date_str):
+    if not all([NOTION_TOKEN, NOTION_PAGE_ID]):
+        print("⏭️  Notion not configured — skipping")
+        return
 
+    try:
+        from notion_client import Client
+        notion = Client(auth=NOTION_TOKEN)
 
-def save_to_notion(brief: dict, date_str: str):
-    notion = NotionClient(auth=NOTION_TOKEN)
+        def block(heading, content):
+            return [
+                {"object":"block","type":"heading_3","heading_3":{"rich_text":[{"type":"text","text":{"content":heading}}]}},
+                {"object":"block","type":"paragraph","paragraph":{"rich_text":[{"type":"text","text":{"content":content}}]}}
+            ]
 
-    score_val = float(brief.get("biasScore","5/10").split("/")[0])
-    label = brief.get("biasLabel","—")
-    rationale = brief.get("biasRationale","")
+        news_text  = "\n".join([f"[{n['tag'].upper()}] {n['text']} — {n['source']}" for n in brief.get("news",[])])
+        up_text    = "\n\n".join([f"{p['ticker']} | {p['score']}/10 | {p['signal']}\n{p['catalyst']}" for p in brief.get("upsidePlays",[])])
+        dn_text    = "\n\n".join([f"{p['ticker']} | {p['score']}/10 | {p['signal']}\n{p['catalyst']}" for p in brief.get("downsidePlays",[])])
+        th_text    = "\n\n".join([f"[{t['tier']}] {t['ticker']}\n{t['body']}" for t in brief.get("thesis",[])])
+        macro_text = "\n".join([f"{m['date']} | {m['impact'].upper()} | {m['event']}" for m in brief.get("macro",[])])
 
-    news_text = "\n".join([
-        f"[{n['tag'].upper()}] {n['text']} — {n['source']}"
-        for n in brief.get("news",[])
-    ])
-    up_text = "\n".join([
-        f"{p['ticker']} | {p['score']}/10 | {p['signal']}\n{p['catalyst']}\nPlay: {p.get('option','N/A')} | {p.get('sizing','')}"
-        for p in brief.get("upsidePlays",[])
-    ])
-    dn_text = "\n".join([
-        f"{p['ticker']} | {p['score']}/10 | {p['signal']}\n{p['catalyst']}\nPlay: {p.get('option','N/A')} | {p.get('sizing','')}"
-        for p in brief.get("downsidePlays",[])
-    ])
-    thesis_text = "\n".join([
-        f"[{t['tier']}] {t['ticker']}\n{t['body']}"
-        for t in brief.get("thesis",[])
-    ])
-    ob_text = "\n".join([
-        f"{o['ticker']} — RSI {o['rsi']} — {o['flag']}: {o['note']}"
-        for o in brief.get("overbought",[])
-    ])
-    macro_text = "\n".join([
-        f"{m['date']} | {m['impact'].upper()} | {m['event']}"
-        for m in brief.get("macro",[])
-    ])
-
-    def block(heading, content):
-        return [
-            {"object":"block","type":"heading_3","heading_3":{"rich_text":[{"type":"text","text":{"content":heading}}]}},
-            {"object":"block","type":"paragraph","paragraph":{"rich_text":[{"type":"text","text":{"content":content}}]}}
+        children = [
+            {"object":"block","type":"callout","callout":{
+                "rich_text":[{"type":"text","text":{"content":f"{brief.get('biasScore','—')} — {brief.get('biasLabel','')}\n{brief.get('biasRationale','')}"}}],
+                "icon":{"emoji":"🐂"},"color":"gray_background"
+            }}
         ]
+        children += block("📰 News", news_text)
+        children += block("🟢 Upside", up_text)
+        children += block("🔴 Downside", dn_text)
+        children += block("🧠 Thesis", th_text)
+        children += block("📅 Macro", macro_text)
 
-    children = [
-        {"object":"block","type":"callout","callout":{
-            "rich_text":[{"type":"text","text":{"content":f"{brief.get('biasScore','—')} — {label}\n{rationale}"}}],
-            "icon":{"emoji":"🐂"},
-            "color":"gray_background"
-        }}
-    ]
-    children += block("📰 News & Sentiment", news_text)
-    children += block("🟢 Upside Plays", up_text)
-    children += block("🔴 Downside Plays", dn_text)
-    children += block("🧠 Thesis Plays", thesis_text)
-    children += block("⚠️ Overbought Flags", ob_text)
-    children += block("📅 Macro Calendar", macro_text)
+        notion.pages.create(
+            parent={"page_id": NOTION_PAGE_ID},
+            properties={"title":{"title":[{"type":"text","text":{"content":f"Toro Brief — {date_str}"}}]}},
+            children=children
+        )
+        print("✅ Notion delivered")
+    except Exception as e:
+        print(f"⚠️  Notion failed: {e}")
 
-    notion.pages.create(
-        parent={"page_id": NOTION_PAGE_ID},
-        properties={"title": {"title": [{"type":"text","text":{"content":f"Toro Brief — {date_str}"}}]}},
-        children=children
-    )
-    print("✅ Notion page created")
-
-
-# ─── MAIN ─────────────────────────────────────────────────────────────────────
+# ── MAIN ──────────────────────────────────────────────────────────────────────
 
 def main():
-    now = datetime.datetime.now()
-    date_str = now.strftime("%A, %B %-d, %Y")
+    date_str = datetime.datetime.now().strftime("%A, %B %-d, %Y")
     print(f"🐂 Toro Brief starting — {date_str}")
 
     print("📈 Fetching market pulse...")
     pulse = fetch_market_pulse()
+    print(f"   Pulse: {[p['ticker']+' '+p['chg'] for p in pulse]}")
 
-    print("📂 Fetching Robinhood positions...")
-    rh_positions = fetch_robinhood_positions()
+    print("🧠 Generating AI brief...")
+    brief = generate_brief(pulse)
+    print(f"   Bias: {brief.get('biasScore')} — {brief.get('biasLabel')}")
 
-    print("🧠 Generating AI brief (with web search)...")
-    brief = generate_brief(pulse, rh_positions)
+    print("💬 Sending to Discord...")
+    send_discord(brief, pulse, date_str)
 
     print("📧 Sending email...")
-    html = format_html_email(brief, pulse, date_str)
-    send_email(html, date_str)
-
-    print("💬 Sending Discord...")
-    embeds = format_discord_embeds(brief, pulse, date_str)
-    send_discord(embeds)
+    send_email(brief, pulse, date_str)
 
     print("📝 Saving to Notion...")
     save_to_notion(brief, date_str)
 
     print("✅ All done.")
-
 
 if __name__ == "__main__":
     main()

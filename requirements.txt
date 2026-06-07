@@ -1,4 +1,4 @@
 anthropic>=0.40.0
 yfinance>=0.2.40
-notion-client>=2.2.1
 requests>=2.31.0
+notion-client>=2.2.1

@@ -2,10 +2,11 @@ name: Toro Brief — Daily Market Analysis
 
 on:
   schedule:
-    # 9:00 PM ET = 1:00 AM UTC (during EDT, UTC-4)
-    # Runs Mon–Fri
     - cron: '0 1 * * 2-6'
-  workflow_dispatch:   # Allow manual runs from GitHub UI
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   run-brief:
@@ -19,20 +20,16 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Run Toro Brief
         env:
-          ANTHROPIC_API_KEY:    ${{ secrets.ANTHROPIC_API_KEY }}
-          NOTION_TOKEN:         ${{ secrets.NOTION_TOKEN }}
-          NOTION_PAGE_ID:       ${{ secrets.NOTION_PAGE_ID }}
-          GMAIL_USER:           ${{ secrets.GMAIL_USER }}
-          GMAIL_APP_PASSWORD:   ${{ secrets.GMAIL_APP_PASSWORD }}
-          GMAIL_TO:             ${{ secrets.GMAIL_TO }}
-          DISCORD_WEBHOOK_URL:  ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: |
-          python src/toro_brief.py
+          ANTHROPIC_API_KEY:   ${{ secrets.ANTHROPIC_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GMAIL_USER:          ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD:  ${{ secrets.GMAIL_APP_PASSWORD }}
+          GMAIL_TO:            ${{ secrets.GMAIL_TO }}
+        run: python src/toro_brief.py
